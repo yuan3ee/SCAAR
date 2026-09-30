@@ -1,0 +1,227 @@
+import os
+import numpy as np
+import torch
+from skimage import io
+from torch.utils import data
+import utils.transform as transform
+import matplotlib.pyplot as plt
+from skimage.transform import rescale
+from torchvision.transforms import functional as F
+# from osgeo import gdal_array
+import cv2
+from PIL import Image
+# from .transform_w import crop, hflip, normalize, resize, color_transformation, color_transformation_new
+from copy import deepcopy
+
+num_classes = 7
+ST_COLORMAP = [[255,255,255], [0,0,255], [128,128,128], [0,128,0], [0,255,0], [128,0,0], [255,0,0]]
+ST_CLASSES = ['unchanged', 'water', 'ground', 'low vegetation', 'tree', 'building', 'sports field']
+
+# JL1H
+# ST_COLORMAP = [[255,255,255], [0,128,0], [0,0,128], [128,0,0], [0,128,128], [128,128,0]]
+# ST_CLASSES = ['unchanged', 'farm', 'road', 'tree', 'building', 'other']
+
+MEAN_A = np.array([113.40, 114.08, 116.45])
+STD_A  = np.array([48.30,  46.27,  48.14])
+MEAN_B = np.array([111.07, 114.04, 118.18])
+STD_B  = np.array([49.41,  47.01,  47.94])
+
+
+# root = '/mnt/sda/su8/SCD/Dataset/second_robust/Medium'
+# root = '/mnt/sda/su8/SCD/Dataset/second_robust/Mild'
+root = '/mnt/sda/su8/SCD/Dataset/second_robust/Severe'
+
+colormap2label = np.zeros(256 ** 3)
+for i, cm in enumerate(ST_COLORMAP):
+    colormap2label[(cm[0] * 256 + cm[1]) * 256 + cm[2]] = i
+
+def Colorls2Index(ColorLabels):
+    IndexLabels = []
+    for i, data in enumerate(ColorLabels):
+        IndexMap = Color2Index(data)
+        IndexLabels.append(IndexMap)
+    return IndexLabels
+
+def Color2Index(ColorLabel):
+    data = ColorLabel.astype(np.int32)
+    idx = (data[:, :, 0] * 256 + data[:, :, 1]) * 256 + data[:, :, 2]
+    IndexMap = colormap2label[idx]
+    #IndexMap = 2*(IndexMap > 1) + 1 * (IndexMap <= 1)
+    IndexMap = IndexMap * (IndexMap < num_classes)
+    return IndexMap
+
+def Index2Color(pred):
+    colormap = np.asarray(ST_COLORMAP, dtype='uint8')
+    x = np.asarray(pred, dtype='int32')
+    return colormap[x, :]
+
+def showIMG(img):
+    plt.imshow(img)
+    plt.show()
+    return 0
+
+def normalize_image(im, time='A'):
+    assert time in ['A', 'B']
+    if time=='A':
+        im = (im - MEAN_A) / STD_A
+    else:
+        im = (im - MEAN_B) / STD_B
+    return im
+
+def normalize_images(imgs, time='A'):
+    for i, im in enumerate(imgs):
+        imgs[i] = normalize_image(im, time)
+    return imgs
+
+# def read_RSimages(mode, rescale=False):
+#     #assert mode in ['train', 'val', 'test']
+#     img_A_dir = os.path.join(root, mode, 'im1')
+#     img_B_dir = os.path.join(root, mode, 'im2')
+#     label_A_dir = os.path.join(root, mode, 'label1')
+#     label_B_dir = os.path.join(root, mode, 'label2')
+#     # To use rgb labels:
+#     # label_A_dir = os.path.join(root, mode, 'label1_rgb')
+#     # label_B_dir = os.path.join(root, mode, 'label2_rgb')
+#
+#     data_list = os.listdir(img_A_dir)
+#     imgs_list_A, imgs_list_B, labels_A, labels_B = [], [], [], []
+#     count = 0
+#     for it in data_list:
+#         # print(it)
+#         if (it[-4:]=='.png'):
+#             img_A_path = os.path.join(img_A_dir, it)
+#             img_B_path = os.path.join(img_B_dir, it)
+#             label_A_path = os.path.join(label_A_dir, it.replace('.tif','.png'))
+#             label_B_path = os.path.join(label_B_dir, it.replace('.tif','.png'))
+#
+#             imgs_list_A.append(img_A_path)
+#             imgs_list_B.append(img_B_path)
+#
+#             label_A = io.imread(label_A_path)
+#             label_B = io.imread(label_B_path)
+#             # for rgb labels:
+#             # label_A = Color2Index(label_A)
+#             # label_B = Color2Index(label_B)
+#             labels_A.append(label_A)
+#             labels_B.append(label_B)
+#         count+=1
+#         if not count%500: print('%d/%d images loaded.'%(count, len(data_list)))
+#
+#     print(labels_A[0].shape)
+#     print(str(len(imgs_list_A)) + ' ' + mode + ' images' + ' loaded.')
+#
+#     return imgs_list_A, imgs_list_B, labels_A, labels_B
+
+
+def to_numpy_img(img):
+    """
+    输入: numpy array, shape = (H,W,C) 或 (C,H,W)
+    输出: numpy array, shape = (H,W,C)
+    """
+    if img.ndim == 3 and img.shape[0] in [1, 3]:  # C,H,W → H,W,C
+        img = np.transpose(img, (1, 2, 0))
+    if img.max() <= 1.0:  # 如果归一化了，转回0-255
+        img = (img * 255).astype(np.uint8)
+    return img
+
+def to_numpy_label(lbl):
+    return lbl.astype(np.uint8)
+
+
+# class Data(data.Dataset):
+#     def __init__(self, mode, random_flip=False, visual=False):
+#         self.random_flip = random_flip
+#         self.imgs_list_A, self.imgs_list_B, self.labels_A, self.labels_B = read_RSimages(mode)
+#         self.visual = visual
+#
+#     def get_mask_name(self, idx):
+#         mask_name = os.path.split(self.imgs_list_A[idx])[-1]
+#         return mask_name
+#
+#     def __getitem__(self, idx):
+#         img_A = io.imread(self.imgs_list_A[idx])
+#         img_A = normalize_image(img_A, 'A')
+#         img_B = io.imread(self.imgs_list_B[idx])
+#         img_B = normalize_image(img_B, 'B')
+#
+#         label_A = self.labels_A[idx]
+#         label_B = self.labels_B[idx]
+#         if self.visual == True:
+#             return F.to_tensor(img_A), F.to_tensor(img_B), torch.from_numpy(label_A), torch.from_numpy(label_B), \
+#             self.imgs_list_A[idx].replace(root, '')
+#         if self.random_flip:
+#             img_A, img_B, label_A, label_B = transform.rand_rot90_flip_MCD(img_A, img_B, label_A, label_B)
+#         return F.to_tensor(img_A), F.to_tensor(img_B), torch.from_numpy(label_A), torch.from_numpy(label_B)
+#
+#     def __len__(self):
+#         return len(self.imgs_list_A)
+
+
+def read_RSimages(root, mode, rescale=False):
+    img_A_dir = os.path.join(root, mode, 'im1')
+    img_B_dir = os.path.join(root, mode, 'im2')
+    label_A_dir = os.path.join(root, mode, 'label1')
+    label_B_dir = os.path.join(root, mode, 'label2')
+
+    data_list = os.listdir(img_A_dir)
+    imgs_list_A, imgs_list_B, labels_A, labels_B = [], [], [], []
+    count = 0
+
+    for it in data_list:
+        if it.lower().endswith('.png'):
+            img_A_path = os.path.join(img_A_dir, it)
+            img_B_path = os.path.join(img_B_dir, it)
+            label_A_path = os.path.join(label_A_dir, it.replace('.tif', '.png'))
+            label_B_path = os.path.join(label_B_dir, it.replace('.tif', '.png'))
+
+            imgs_list_A.append(img_A_path)
+            imgs_list_B.append(img_B_path)
+
+            label_A = io.imread(label_A_path)
+            label_B = io.imread(label_B_path)
+            labels_A.append(label_A)
+            labels_B.append(label_B)
+
+        count += 1
+        if count % 500 == 0:
+            print(f'{count}/{len(data_list)} images loaded.')
+
+    print(labels_A[0].shape)
+    print(f'{len(imgs_list_A)} {mode} images loaded from {root}')
+    return imgs_list_A, imgs_list_B, labels_A, labels_B
+
+
+class Data(data.Dataset):
+    def __init__(self, root, mode, random_flip=False, visual=False):
+        self.root = root
+        self.mode = mode
+        self.random_flip = random_flip
+        self.visual = visual
+
+        self.imgs_list_A, self.imgs_list_B, self.labels_A, self.labels_B = read_RSimages(
+            root=self.root, mode=self.mode
+        )
+
+    def get_mask_name(self, idx):
+        return os.path.split(self.imgs_list_A[idx])[-1]
+
+    def __getitem__(self, idx):
+        img_A = io.imread(self.imgs_list_A[idx])
+        img_A = normalize_image(img_A, 'A')
+        img_B = io.imread(self.imgs_list_B[idx])
+        img_B = normalize_image(img_B, 'B')
+
+        label_A = self.labels_A[idx]
+        label_B = self.labels_B[idx]
+
+        if self.visual:
+            rel = self.imgs_list_A[idx].replace(self.root, '')
+            return F.to_tensor(img_A), F.to_tensor(img_B), torch.from_numpy(label_A), torch.from_numpy(label_B), rel
+
+        if self.random_flip:
+            img_A, img_B, label_A, label_B = transform.rand_rot90_flip_MCD(img_A, img_B, label_A, label_B)
+
+        return F.to_tensor(img_A), F.to_tensor(img_B), torch.from_numpy(label_A), torch.from_numpy(label_B)
+
+    def __len__(self):
+        return len(self.imgs_list_A)
